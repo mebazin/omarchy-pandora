@@ -1,23 +1,76 @@
-# Pandora
+# Pandora for the Omarchy bar
 
-Station radio in the Omarchy bar. Click the P to open a card: now playing,
-play/pause, skip, thumbs, and your stations. Audio keeps going after the
-card closes.
+Pandora station radio as an [Omarchy](https://omarchy.org) shell plugin.
+A **P** in the bar opens a card with now playing, play/pause, skip, thumbs
+up/down, "tired of this song", and a station picker. Audio keeps playing
+when the card closes and across shell restarts.
 
-This talks to Pandora's unofficial web API. The dedicated Pandora window
-(Super + Space → Pandora) is still there for the full site. Only one of
-them can stream at a time.
+Built for Omarchy's Quickshell-based shell. Text and borders follow the
+active theme.
+
+## Requirements
+
+- Omarchy with the bar plugin system (`omarchy plugin` commands)
+- `python` with `python-requests`
+- `mpv`
+- `libsecret` (`secret-tool`) and a running keyring, which Omarchy has by
+  default. The password is stored there once and reused for autologin.
+- A Pandora account
+
+## Install
+
+```sh
+omarchy plugin add https://github.com/markbazin/omarchy-pandora --enable
+```
+
+Then bind a key in your Hyprland config. Use the shell's routed toggle so
+the card opens on the focused monitor:
+
+```lua
+o.bind("SUPER + SHIFT + M", "Pandora", "omarchy-shell shell toggle mark.pandora")
+```
 
 ## Use
 
-- Click the bar icon, or Super + Shift + M. Bind the key to
-  `omarchy-shell shell toggle mark.pandora` so the card opens on the
-  focused monitor; the plugin's own IPC target only reaches one bar copy
-- Middle-click the icon to play/pause
-- Sign in once; the password goes in the system keyring
+- Click the bar icon or press your key to open the card
+- Middle-click the icon to play/pause without opening it
+- In the card: Space play/pause, J thumb up, K thumb down, Esc close
+- Sign in once. The password goes in the system keyring; the engine signs
+  in by itself on later starts
 
-## Files
+Other IPC commands, for scripts or extra keybindings:
 
-- `bin/pandora-engine` — login, stations, mpv playback
-- `Service.qml` — socket client the bar reads
-- `BarWidget.qml` / `Popover.qml` — icon and card
+```sh
+omarchy-shell mark.pandora play
+omarchy-shell mark.pandora pause
+omarchy-shell mark.pandora skip
+omarchy-shell mark.pandora thumbUp
+omarchy-shell mark.pandora thumbDown
+```
+
+## How it works
+
+- `bin/pandora-engine` is a small Python daemon. It talks to Pandora's
+  **unofficial** web API, plays audio through `mpv`, and serves
+  newline-delimited JSON over a Unix socket in `$XDG_RUNTIME_DIR`.
+- `Service.qml` is the socket client the shell loads once.
+- `BarWidget.qml` and `Popover.qml` are the icon and the card.
+
+Logs and saved state live in `~/.local/state/mark.pandora/`.
+
+## Caveats
+
+- This uses the same private API as the Pandora website. It is not
+  supported by Pandora and may stop working if they change it.
+- Pandora allows one stream per account at a time. Starting playback here
+  takes over from the website or app, and vice versa.
+- Pandora is US-only.
+
+## Development
+
+See [CLAUDE.md](CLAUDE.md) for the architecture, threading model, socket
+protocol, and how to verify changes against a live shell.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

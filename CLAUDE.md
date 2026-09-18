@@ -54,7 +54,7 @@ do not reset on progress ticks. Keep that property when adding fields.
   `omarchy-shell shell toggle mark.pandora` (routed to the focused monitor).
   `omarchy-shell mark.pandora play|pause|skip|thumbUp|thumbDown` are fine
   because they do not care which copy answers.
-- The Hyprland binding (Super+Shift+M) lives in `~/.config/hypr/bindings.lua`,
+- The hotkey binding lives in the user's Hyprland config,
   outside this repo.
 
 ## Verifying changes
