@@ -10,7 +10,9 @@ them can stream at a time.
 
 ## Use
 
-- Click the bar icon, or Super + Shift + M
+- Click the bar icon, or Super + Shift + M. Bind the key to
+  `omarchy-shell shell toggle mark.pandora` so the card opens on the
+  focused monitor; the plugin's own IPC target only reaches one bar copy
 - Middle-click the icon to play/pause
 - Sign in once; the password goes in the system keyring
 
