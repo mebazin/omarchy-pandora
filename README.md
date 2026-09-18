@@ -5,6 +5,8 @@ A **P** in the bar opens a card with now playing, play/pause, skip, thumbs
 up/down, "tired of this song", and a station picker. Audio keeps playing
 when the card closes and across shell restarts.
 
+<img src="docs/card.png" alt="The Pandora card: album art, track info, station button, transport and thumbs buttons" width="404">
+
 Built for Omarchy's Quickshell-based shell. Text and borders follow the
 active theme.
 
