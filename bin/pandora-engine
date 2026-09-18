@@ -1,0 +1,1061 @@
+#!/usr/bin/env python3
+"""Pandora playback engine for the Omarchy bar plugin.
+
+Talks to Pandora's unofficial web REST API and plays station audio through
+mpv. The Quickshell plugin is a thin client over a newline-JSON Unix socket.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import select
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from pathlib import Path
+
+import requests
+
+API = "https://www.pandora.com/api/v1"
+ORIGIN = "https://www.pandora.com"
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0"
+)
+PROTOCOL = 1
+PLUGIN_ID = "mark.pandora"
+
+
+def runtime_dir() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    path = Path(base) / PLUGIN_ID
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def state_dir() -> Path:
+    base = os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))
+    path = Path(base) / PLUGIN_ID
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def log(message: str) -> None:
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}"
+    try:
+        with (state_dir() / "engine.log").open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    print(line, file=sys.stderr, flush=True)
+
+
+def pick_art(images, preferred: int = 500) -> str:
+    if not images:
+        return ""
+    if isinstance(images, str):
+        return images
+    best = ""
+    best_size = -1
+    for item in images:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") or ""
+        if not url:
+            continue
+        size = int(item.get("size") or 0)
+        if size == preferred:
+            return url
+        if size > best_size:
+            best_size = size
+            best = url
+    if best:
+        return best
+    last = images[-1] if images else None
+    if isinstance(last, dict):
+        return last.get("url") or ""
+    return ""
+
+
+def parse_track(raw: dict) -> dict | None:
+    title = (raw.get("songTitle") or raw.get("songName") or "").strip()
+    if "curator message" in title.lower():
+        return None
+    audio = raw.get("audioURL") or raw.get("audioUrl") or ""
+    if not audio:
+        return None
+    rating = raw.get("songRating")
+    if rating == 1:
+        rating_s = "up"
+    elif rating == -1:
+        rating_s = "down"
+    else:
+        rating_s = ""
+    return {
+        "id": str(raw.get("pandoraId") or raw.get("musicId") or ""),
+        "token": str(raw.get("trackToken") or raw.get("token") or ""),
+        "title": title or "Unknown",
+        "artist": str(raw.get("artistName") or ""),
+        "album": str(raw.get("albumTitle") or ""),
+        "art": pick_art(raw.get("albumArt") or raw.get("art") or []),
+        "duration": int(raw.get("trackLength") or raw.get("trackDuration") or 0),
+        "audio_url": audio,
+        "rating": rating_s,
+        "allow_feedback": bool(raw.get("allowFeedback", True)),
+    }
+
+
+def parse_station(raw: dict) -> dict | None:
+    station_id = str(raw.get("stationId") or "")
+    name = str(raw.get("name") or "").strip()
+    if not station_id or not name:
+        return None
+    return {
+        "id": station_id,
+        "name": name,
+        "art": pick_art(raw.get("art") or []),
+    }
+
+
+def secret_store(email: str, password: str) -> None:
+    subprocess.run(
+        [
+            "secret-tool",
+            "store",
+            "--label=Pandora",
+            "service",
+            PLUGIN_ID,
+            "email",
+            email,
+        ],
+        input=password.encode(),
+        check=True,
+    )
+
+
+def secret_lookup() -> tuple[str, str] | None:
+    search = subprocess.run(
+        ["secret-tool", "search", "service", PLUGIN_ID],
+        capture_output=True,
+        text=True,
+    )
+    if search.returncode != 0:
+        return None
+    # secret-tool prints the item's attributes on stderr, not stdout.
+    email = ""
+    for line in (search.stdout + search.stderr).splitlines():
+        if "attribute.email" in line and "=" in line:
+            email = line.split("=", 1)[1].strip()
+    lookup = subprocess.run(
+        ["secret-tool", "lookup", "service", PLUGIN_ID],
+        capture_output=True,
+        text=True,
+    )
+    password = lookup.stdout
+    if lookup.returncode != 0 or not password:
+        return None
+    if not email:
+        return None
+    return email, password
+
+
+def secret_clear() -> None:
+    subprocess.run(
+        ["secret-tool", "clear", "service", PLUGIN_ID],
+        capture_output=True,
+    )
+
+
+class Pandora:
+    def __init__(self) -> None:
+        self.http = requests.Session()
+        self.http.headers.update(
+            {
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Origin": ORIGIN,
+                "Referer": ORIGIN + "/",
+            }
+        )
+        self.csrf = ""
+        self.auth = ""
+        self.email = ""
+        self.high_quality = True
+
+    def _headers(self) -> dict:
+        headers = {
+            "Content-Type": "application/json;charset=utf-8",
+            "X-CsrfToken": self.csrf,
+        }
+        if self.auth:
+            headers["X-AuthToken"] = self.auth
+        return headers
+
+    def _ensure_csrf(self) -> None:
+        try:
+            response = self.http.head(ORIGIN + "/", timeout=10)
+            token = response.cookies.get("csrftoken")
+            if token:
+                self.csrf = token
+                return
+        except requests.RequestException:
+            pass
+        import secrets
+
+        self.csrf = secrets.token_hex(16)
+        self.http.cookies.set("csrftoken", self.csrf, domain="pandora.com")
+
+    def login(self, email: str, password: str) -> None:
+        self._ensure_csrf()
+        response = self.http.post(
+            f"{API}/auth/login",
+            headers=self._headers(),
+            json={
+                "username": email,
+                "password": password,
+                "keepLoggedIn": True,
+                "existingAuthToken": None,
+            },
+            timeout=30,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Login failed (HTTP {response.status_code})")
+        data = response.json()
+        if data.get("errorCode") is not None:
+            raise RuntimeError(data.get("message") or data.get("errorString") or "Login failed")
+        token = data.get("authToken")
+        if not token:
+            raise RuntimeError("Pandora did not return an auth token")
+        self.auth = token
+        self.email = email
+        flags = set((data.get("config") or {}).get("flags") or [])
+        self.high_quality = (
+            "highQualityStreamingAvailable" in flags if flags else True
+        )
+
+    def request(self, path: str, payload: dict | None = None, *, retry: bool = True) -> dict:
+        if not self.auth:
+            raise RuntimeError("Not signed in")
+        response = self.http.post(
+            API + path,
+            headers=self._headers(),
+            json=payload or {},
+            timeout=30,
+        )
+        if response.status_code == 401 and retry:
+            creds = secret_lookup()
+            if not creds:
+                raise RuntimeError("Session expired. Sign in again.")
+            self.login(*creds)
+            return self.request(path, payload, retry=False)
+        if response.status_code == 429:
+            body: dict = {}
+            try:
+                body = response.json()
+            except ValueError:
+                pass
+            if body.get("errorString") == "STREAM_VIOLATION":
+                self.request("/station/playbackResumed", {"forceActive": True}, retry=False)
+                return self.request(path, payload, retry=False)
+            raise RuntimeError("Pandora rate-limited this request")
+        if response.status_code >= 400:
+            raise RuntimeError(f"Pandora API error (HTTP {response.status_code})")
+        data = response.json()
+        if data.get("errorCode") is not None:
+            raise RuntimeError(data.get("message") or data.get("errorString") or "Pandora error")
+        return data
+
+    def stations(self) -> list[dict]:
+        data = self.request("/station/getStations", {"pageSize": 250})
+        out = []
+        for raw in data.get("stations") or []:
+            station = parse_station(raw)
+            if station:
+                out.append(station)
+        return out
+
+    def fragment(self, station_id: str, start: bool) -> list[dict]:
+        data = self.request(
+            "/playlist/getFragment",
+            {
+                "stationId": station_id,
+                "isStationStart": start,
+                "fragmentRequestReason": "Normal",
+                "audioFormat": "mp3-hifi" if self.high_quality else "aacplus",
+                "startingAtTrackId": None,
+                "onDemandArtistMessageArtistUidHex": None,
+                "onDemandArtistMessageIdHex": None,
+            },
+        )
+        tracks = []
+        for raw in data.get("tracks") or []:
+            track = parse_track(raw)
+            if track:
+                tracks.append(track)
+        return tracks
+
+    def playable_fragment(self, station_id: str, start: bool) -> list[dict]:
+        """A fragment can be nothing but ads or curator messages. Ask once more
+        before giving up."""
+        tracks = self.fragment(station_id, start)
+        if not tracks:
+            tracks = self.fragment(station_id, False)
+        if not tracks:
+            raise RuntimeError("Pandora returned no playable tracks")
+        return tracks
+
+    def add_feedback(self, token: str, positive: bool) -> None:
+        if not token:
+            raise RuntimeError("This track cannot be rated")
+        self.request("/station/addFeedback", {"trackToken": token, "isPositive": positive})
+
+    def tired(self, token: str) -> None:
+        if not token:
+            raise RuntimeError("This track cannot be skipped as tired")
+        self.request("/listener/addTiredSong", {"trackToken": token})
+
+    def takeover(self) -> None:
+        self.request("/station/playbackResumed", {"forceActive": True}, retry=False)
+
+
+class Mpv:
+    def __init__(self, sock_path: Path) -> None:
+        self.sock_path = sock_path
+        self.proc: subprocess.Popen | None = None
+        self.sock: socket.socket | None = None
+        self.buf = b""
+        self.expect_stop = False
+        # Set when mpv closed the IPC socket on its own (crash or exit).
+        self.exited = False
+
+    def start(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            return
+        self.stop()
+        if self.sock_path.exists():
+            try:
+                self.sock_path.unlink()
+            except OSError:
+                pass
+        cmd = [
+            "mpv",
+            "--no-video",
+            "--force-window=no",
+            "--idle=yes",
+            "--really-quiet",
+            "--no-terminal",
+            "--ytdl=no",
+            "--cache=yes",
+            "--demuxer-max-bytes=64MiB",
+            f"--input-ipc-server={self.sock_path}",
+            "--title=Pandora",
+            "--force-media-title=Pandora",
+        ]
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if self.sock_path.exists():
+                try:
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    sock.setblocking(False)
+                    sock.connect(str(self.sock_path))
+                    self.sock = sock
+                    self.cmd(["observe_property", 1, "time-pos"])
+                    self.cmd(["observe_property", 2, "pause"])
+                    return
+                except OSError:
+                    pass
+            time.sleep(0.05)
+        raise RuntimeError("mpv did not start")
+
+    def stop(self) -> None:
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+        self.buf = b""
+
+    def cmd(self, command: list) -> None:
+        if self.sock is None:
+            return
+        payload = (json.dumps({"command": command}) + "\n").encode()
+        try:
+            self.sock.sendall(payload)
+        except OSError:
+            pass
+
+    def load(self, url: str, title: str) -> None:
+        self.start()
+        self.expect_stop = True
+        self.cmd(["set_property", "force-media-title", title])
+        self.cmd(["loadfile", url, "replace"])
+        self.cmd(["set_property", "pause", False])
+
+    def pause(self, paused: bool) -> None:
+        self.cmd(["set_property", "pause", paused])
+
+    def poll(self) -> list[dict]:
+        if self.sock is None:
+            return []
+        messages = []
+        try:
+            chunk = self.sock.recv(65536)
+        except BlockingIOError:
+            return []
+        except OSError:
+            chunk = b""
+        if not chunk:
+            # mpv closed its end. Drop the socket now, otherwise select() keeps
+            # reporting the dead descriptor readable and the main loop spins.
+            self.stop()
+            self.exited = True
+            return []
+        self.buf += chunk
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            if not line.strip():
+                continue
+            try:
+                messages.append(json.loads(line.decode()))
+            except ValueError:
+                continue
+        return messages
+
+
+class Worker:
+    """Runs blocking jobs (Pandora HTTP calls) off the main loop.
+
+    Jobs run one at a time, in order, on a background thread. Each job's
+    completion callback is queued back and executed on the main thread from
+    `drain()`, so Engine state is only ever touched from one thread. The pipe
+    lets select() wake up when a result is ready.
+    """
+
+    def __init__(self) -> None:
+        self.jobs: queue.Queue = queue.Queue()
+        self.results: queue.Queue = queue.Queue()
+        self.rfd, self.wfd = os.pipe()
+        os.set_blocking(self.rfd, False)
+        threading.Thread(target=self._run, name="pandora-worker", daemon=True).start()
+
+    def submit(self, job, done) -> None:
+        self.jobs.put((job, done))
+
+    def _run(self) -> None:
+        while True:
+            job, done = self.jobs.get()
+            try:
+                result, exc = job(), None
+            except Exception as error:  # noqa: BLE001 - reported to the UI
+                result, exc = None, error
+            self.results.put((done, result, exc))
+            try:
+                os.write(self.wfd, b"x")
+            except OSError:
+                pass
+
+    def drain(self) -> None:
+        try:
+            os.read(self.rfd, 4096)
+        except (BlockingIOError, OSError):
+            pass
+        while True:
+            try:
+                done, result, exc = self.results.get_nowait()
+            except queue.Empty:
+                return
+            done(result, exc)
+
+
+class Engine:
+    def __init__(self, worker: Worker) -> None:
+        self.worker = worker
+        self.api = Pandora()
+        self.mpv = Mpv(runtime_dir() / "mpv.sock")
+        self.clients: list[socket.socket] = []
+        self.stations: list[dict] = []
+        self.queue: list[dict] = []
+        self.track: dict | None = None
+        self.station_id = ""
+        self.station_start = True
+        self.playing = False
+        self.paused = False
+        self.elapsed = 0.0
+        self.status = "idle"
+        self.error = ""
+        self.last_broadcast = 0.0
+        # Network work finishes later on the worker. `session` invalidates
+        # results from before a sign-out; `playback` invalidates fragments
+        # fetched for a station that is no longer selected. `fetching` and
+        # `want_next` coordinate the single in-flight fragment request.
+        self.session = 0
+        self.playback = 0
+        self.fetching = False
+        self.want_next = False
+        self.persist = self._load_persist()
+
+    def _submit(self, job, done) -> None:
+        """Run `job` on the worker and hand the result to `done(result, exc)`
+        on the main thread, unless the account changed in between."""
+        session = self.session
+
+        def wrapped(result, exc) -> None:
+            if session == self.session:
+                done(result, exc)
+
+        self.worker.submit(job, wrapped)
+
+    def _load_persist(self) -> dict:
+        path = state_dir() / "state.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _save_persist(self) -> None:
+        data = {
+            "email": self.api.email,
+            "stationId": self.station_id,
+        }
+        try:
+            (state_dir() / "state.json").write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    def current_station(self) -> dict | None:
+        for station in self.stations:
+            if station["id"] == self.station_id:
+                return station
+        return None
+
+    def snapshot(self) -> dict:
+        track = None
+        if self.track:
+            track = {
+                "id": self.track.get("id", ""),
+                "title": self.track.get("title", ""),
+                "artist": self.track.get("artist", ""),
+                "album": self.track.get("album", ""),
+                "art": self.track.get("art", ""),
+                "duration": self.track.get("duration", 0),
+                "elapsed": int(self.elapsed),
+                "rating": self.track.get("rating", ""),
+                "allowFeedback": self.track.get("allow_feedback", True),
+            }
+        return {
+            "type": "state",
+            "v": PROTOCOL,
+            "authenticated": bool(self.api.auth),
+            "email": self.api.email,
+            "status": self.status,
+            "error": self.error,
+            "playing": self.playing and not self.paused,
+            "paused": self.paused,
+            "station": self.current_station(),
+            "stations": self.stations,
+            "track": track,
+        }
+
+    def broadcast(self) -> None:
+        payload = (json.dumps(self.snapshot()) + "\n").encode()
+        stale = []
+        for client in self.clients:
+            try:
+                client.sendall(payload)
+            except OSError:
+                stale.append(client)
+        for client in stale:
+            self.drop_client(client)
+        self.last_broadcast = time.time()
+
+    def set_error(self, message: str) -> None:
+        self.error = message
+        self.status = "error"
+        log(f"error: {message}")
+        self.broadcast()
+
+    def drop_client(self, client: socket.socket) -> None:
+        try:
+            client.close()
+        except OSError:
+            pass
+        if client in self.clients:
+            self.clients.remove(client)
+
+    def _finish_login(self, stations: list[dict]) -> None:
+        self.stations = stations
+        saved = self.persist.get("stationId") or ""
+        if self.station_id and any(s["id"] == self.station_id for s in stations):
+            pass
+        elif saved and any(s["id"] == saved for s in stations):
+            self.station_id = saved
+        elif stations:
+            self.station_id = stations[0]["id"]
+        self.status = "idle"
+        self.error = ""
+        self._save_persist()
+        log(f"signed in as {self.api.email}")
+        self.broadcast()
+
+    def autologin(self) -> None:
+        creds = secret_lookup()
+        if not creds:
+            self.status = "needs_login"
+            self.broadcast()
+            return
+        self.status = "loading"
+        self.broadcast()
+        api = self.api
+
+        def job():
+            api.login(*creds)
+            return api.stations()
+
+        def done(stations, exc) -> None:
+            if exc:
+                self.status = "needs_login"
+                self.error = str(exc)
+                log(f"autologin failed: {exc}")
+                self.broadcast()
+                return
+            self._finish_login(stations)
+
+        self._submit(job, done)
+
+    def handle(self, message: dict) -> None:
+        kind = message.get("type")
+        try:
+            if kind == "login":
+                self.cmd_login(str(message.get("email") or ""), str(message.get("password") or ""))
+            elif kind == "logout":
+                self.cmd_logout()
+            elif kind == "play":
+                self.cmd_play()
+            elif kind == "pause":
+                self.cmd_pause()
+            elif kind == "toggle":
+                self.cmd_toggle()
+            elif kind == "skip":
+                self.cmd_skip()
+            elif kind == "thumb":
+                self.cmd_thumb(str(message.get("value") or ""))
+            elif kind == "tired":
+                self.cmd_tired()
+            elif kind == "select_station":
+                self.cmd_select(str(message.get("id") or ""))
+            elif kind == "refresh_stations":
+                self.cmd_refresh_stations()
+            elif kind == "takeover":
+                self._submit(self.api.takeover, self._done_simple)
+        except Exception as exc:
+            self.set_error(str(exc))
+
+    def cmd_login(self, email: str, password: str) -> None:
+        email = email.strip()
+        if not email or not password:
+            raise RuntimeError("Email and password are required")
+        self.status = "loading"
+        self.error = ""
+        self.broadcast()
+        api = self.api
+
+        def job():
+            api.login(email, password)
+            secret_store(email, password)
+            return api.stations()
+
+        def done(stations, exc) -> None:
+            if exc:
+                self.status = "needs_login"
+                self.set_error(str(exc))
+                return
+            self._finish_login(stations)
+
+        self._submit(job, done)
+
+    def cmd_refresh_stations(self) -> None:
+        api = self.api
+
+        def done(stations, exc) -> None:
+            if exc:
+                self.set_error(str(exc))
+                return
+            self.stations = stations
+            self.error = ""
+            self.broadcast()
+
+        self._submit(api.stations, done)
+
+    def _done_simple(self, _result, exc) -> None:
+        if exc:
+            self.set_error(str(exc))
+            return
+        self.error = ""
+        self.broadcast()
+
+    def cmd_logout(self) -> None:
+        self.session += 1
+        self.playback += 1
+        self.want_next = False
+        self.mpv.stop()
+        secret_clear()
+        self.api = Pandora()
+        self.stations = []
+        self.queue = []
+        self.track = None
+        self.station_id = ""
+        self.playing = False
+        self.paused = False
+        self.elapsed = 0
+        self.status = "needs_login"
+        self.error = ""
+        self._save_persist()
+        self.broadcast()
+
+    def cmd_select(self, station_id: str) -> None:
+        if not any(s["id"] == station_id for s in self.stations):
+            raise RuntimeError("Unknown station")
+        self.station_id = station_id
+        self.station_start = True
+        self.playback += 1
+        self.queue = []
+        self.want_next = False
+        self._save_persist()
+        self._play_next()
+
+    def cmd_play(self) -> None:
+        if not self.api.auth:
+            return
+        if self.want_next:
+            return  # already waiting on tracks
+        if self.playing and self.paused:
+            self.mpv.pause(False)
+            self.paused = False
+            self.status = "playing"
+            self.broadcast()
+            return
+        if self.playing:
+            return
+        if not self.station_id:
+            if not self.stations:
+                raise RuntimeError("No stations on this account")
+            self.station_id = self.stations[0]["id"]
+        self._play_next()
+
+    def cmd_pause(self) -> None:
+        if not self.playing:
+            return
+        self.mpv.pause(True)
+        self.paused = True
+        self.status = "paused"
+        self.broadcast()
+
+    def cmd_toggle(self) -> None:
+        if self.playing and not self.paused:
+            self.cmd_pause()
+        else:
+            self.cmd_play()
+
+    def cmd_skip(self) -> None:
+        if not self.station_id:
+            return
+        self._play_next()
+
+    def cmd_thumb(self, value: str) -> None:
+        track = self.track
+        if not track:
+            raise RuntimeError("Nothing is playing")
+        token = track.get("token") or ""
+        if not token:
+            raise RuntimeError("This track cannot be rated")
+        positive = value == "up"
+        previous = track.get("rating", "")
+        # Rate optimistically so the button responds at once; the worker
+        # queues the feedback ahead of any fragment fetch the skip triggers.
+        track["rating"] = "up" if positive else "down"
+        self.error = ""
+        self.broadcast()
+        api = self.api
+
+        def done(_result, exc) -> None:
+            if exc:
+                if self.track is track:
+                    track["rating"] = previous
+                self.set_error(str(exc))
+
+        self._submit(lambda: api.add_feedback(token, positive), done)
+        if not positive:
+            self._play_next()
+
+    def cmd_tired(self) -> None:
+        track = self.track
+        if not track:
+            raise RuntimeError("Nothing is playing")
+        token = track.get("token") or ""
+        if not token:
+            raise RuntimeError("This track cannot be skipped as tired")
+        api = self.api
+        self._submit(lambda: api.tired(token), self._done_simple)
+        self._play_next()
+
+    def _start_track(self, track: dict) -> None:
+        title = f"{track['title']} – {track['artist']}".strip(" –")
+        self.mpv.load(track["audio_url"], title or "Pandora")
+        self.track = track
+        self.playing = True
+        self.paused = False
+        self.elapsed = 0
+        self.status = "playing"
+        self.error = ""
+        self.broadcast()
+
+    def _play_next(self) -> None:
+        """Start the next queued track, or fetch tracks first if the queue is
+        empty. Never blocks: the fetch finishes in `_prefetch`'s callback."""
+        if not self.station_id:
+            raise RuntimeError("Pick a station first")
+        if self.queue:
+            self._start_track(self.queue.pop(0))
+            self._prefetch()
+            return
+        self.want_next = True
+        self.status = "loading"
+        self.broadcast()
+        self._prefetch()
+
+    def _prefetch(self) -> None:
+        if self.fetching or len(self.queue) >= 2 or not self.station_id:
+            return
+        api = self.api
+        station_id = self.station_id
+        start = self.station_start
+        self.station_start = False
+        generation = self.playback
+        self.fetching = True
+
+        def job():
+            if start:
+                try:
+                    api.takeover()
+                except Exception as exc:
+                    log(f"takeover: {exc}")
+            return api.playable_fragment(station_id, start)
+
+        def done(tracks, exc) -> None:
+            self.fetching = False
+            if generation != self.playback:
+                # The station changed while this was in flight. If the new
+                # one is waiting on tracks, fetch for it now.
+                if self.want_next:
+                    self._prefetch()
+                return
+            if exc:
+                if self.want_next:
+                    self.want_next = False
+                    self.set_error(str(exc))
+                else:
+                    log(f"prefetch: {exc}")
+                return
+            self.queue.extend(tracks)
+            if self.want_next:
+                self.want_next = False
+                try:
+                    self._start_track(self.queue.pop(0))
+                except Exception as error:
+                    self.set_error(str(error))
+                    return
+                self._prefetch()
+
+        self.worker.submit(job, done)
+
+    def on_mpv(self, message: dict) -> None:
+        event = message.get("event")
+        if event == "end-file":
+            reason = message.get("reason")
+            if self.mpv.expect_stop:
+                self.mpv.expect_stop = False
+                if reason in {"stop", "redirect", "quit"}:
+                    return
+            if reason in {"eof", "error"}:
+                self.playing = False
+                self.paused = False
+                try:
+                    self._play_next()
+                except Exception as exc:
+                    self.set_error(str(exc))
+            return
+        if event == "file-loaded":
+            self.mpv.expect_stop = False
+            return
+        if message.get("event") == "property-change" and message.get("name") == "time-pos":
+            data = message.get("data")
+            if isinstance(data, (int, float)):
+                self.elapsed = float(data)
+
+    def tick(self) -> None:
+        for message in self.mpv.poll():
+            self.on_mpv(message)
+        if self.mpv.exited:
+            self.mpv.exited = False
+            if self.playing:
+                self.playing = False
+                self.paused = False
+                self.set_error("mpv exited unexpectedly")
+        if self.playing and time.time() - self.last_broadcast >= 1:
+            self.broadcast()
+
+
+def bind_socket(path: Path) -> socket.socket:
+    if path.exists():
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.2)
+            probe.connect(str(path))
+            probe.close()
+            log("already running")
+            sys.exit(0)
+        except OSError:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(path))
+    sock.listen(8)
+    sock.setblocking(False)
+    return sock
+
+
+def self_test() -> int:
+    track = parse_track(
+        {
+            "pandoraId": "TR:1",
+            "trackToken": "tok",
+            "songTitle": "Song",
+            "artistName": "Artist",
+            "albumTitle": "Album",
+            "trackLength": 200,
+            "audioURL": "https://example/a.mp3",
+            "albumArt": [{"url": "https://example/a.jpg", "size": 500}],
+            "songRating": 1,
+        }
+    )
+    assert track and track["title"] == "Song" and track["rating"] == "up"
+    assert parse_track({"songTitle": "Curator Message", "audioURL": "x"}) is None
+    station = parse_station({"stationId": "1", "name": "Thumbs Up", "art": []})
+    assert station and station["name"] == "Thumbs Up"
+    print("ok")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if "--self-test" in argv:
+        return self_test()
+    if "--help" in argv or "-h" in argv:
+        print("pandora-engine [--self-test]")
+        return 0
+
+    # The socket carries the password at sign-in; keep it (and the state
+    # files) private to this user rather than world-readable.
+    os.umask(0o077)
+    sock_path = runtime_dir() / "engine.sock"
+    listen = bind_socket(sock_path)
+    worker = Worker()
+    engine = Engine(worker)
+    stopping = False
+
+    def stop(*_args) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    engine.autologin()
+    engine.broadcast()
+    log(f"listening on {sock_path}")
+
+    try:
+        while not stopping:
+            readers: list = [listen, worker.rfd] + engine.clients
+            if engine.mpv.sock is not None:
+                readers.append(engine.mpv.sock)
+            try:
+                ready, _, _ = select.select(readers, [], [], 0.25)
+            except InterruptedError:
+                continue
+            if worker.rfd in ready:
+                worker.drain()
+            if listen in ready:
+                client, _ = listen.accept()
+                client.setblocking(False)
+                engine.clients.append(client)
+                try:
+                    client.sendall((json.dumps(engine.snapshot()) + "\n").encode())
+                except OSError:
+                    engine.drop_client(client)
+            for client in list(engine.clients):
+                if client not in ready:
+                    continue
+                try:
+                    data = client.recv(65536)
+                except OSError:
+                    engine.drop_client(client)
+                    continue
+                if not data:
+                    engine.drop_client(client)
+                    continue
+                for line in data.split(b"\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        message = json.loads(line.decode())
+                    except ValueError:
+                        continue
+                    engine.handle(message)
+            engine.tick()
+    finally:
+        engine.mpv.stop()
+        for client in list(engine.clients):
+            engine.drop_client(client)
+        try:
+            listen.close()
+            sock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        log("stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except SystemExit:
+        raise
+    except Exception:
+        log(traceback.format_exc())
+        raise

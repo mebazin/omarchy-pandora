@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "mark.pandora",
+  "name": "Pandora",
+  "version": "0.1.0",
+  "author": "Mark Bazin",
+  "license": "MIT",
+  "description": "Pandora stations from the Omarchy bar: play, skip, thumbs, and a station picker.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Pandora",
+    "description": "Station radio with thumbs up and thumbs down",
+    "category": "Media",
+    "aliases": ["pandora", "radio", "music"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
