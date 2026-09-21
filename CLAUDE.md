@@ -1,8 +1,8 @@
 # Pandora plugin for the Omarchy shell
 
-Bar widget + popover card for Pandora station radio. Plugin id `mark.pandora`.
+Bar widget + popover card for Pandora station radio. Plugin id `alturatechnology.pandora`.
 The live install and the git checkout are the same directory:
-`~/.config/omarchy/plugins/mark.pandora`. Edit in place, then restart the
+`~/.config/omarchy/plugins/alturatechnology.pandora`. Edit in place, then restart the
 shell to test.
 
 ## Architecture
@@ -11,8 +11,8 @@ shell to test.
   Talks to Pandora's unofficial web API (`https://www.pandora.com/api/v1`),
   plays audio through `mpv --input-ipc-server`, stores the password with
   `secret-tool`, and serves newline-delimited JSON over a Unix socket at
-  `$XDG_RUNTIME_DIR/mark.pandora/engine.sock`. State (`state.json`) and
-  `engine.log` live in `~/.local/state/mark.pandora/`.
+  `$XDG_RUNTIME_DIR/alturatechnology.pandora/engine.sock`. State (`state.json`) and
+  `engine.log` live in `~/.local/state/alturatechnology.pandora/`.
 - `Service.qml`: the shell mounts this once as a service. It owns the socket
   client, relaunches the engine when it is down (capped at 5 spawns per
   outage), and exposes `state`, `stations`, and command functions.
@@ -50,9 +50,9 @@ do not reset on progress ticks. Keep that property when adding fields.
   matching the first-party Wi-Fi and Clockwork panels. Do not hardcode
   colours or use `Color.popups.text`; the theme's bar text is what panels use.
 - There is one bar per monitor, so two widget copies exist and only one owns
-  the `mark.pandora` IPC target. Hotkeys must use
-  `omarchy-shell shell toggle mark.pandora` (routed to the focused monitor).
-  `omarchy-shell mark.pandora play|pause|skip|thumbUp|thumbDown` are fine
+  the `alturatechnology.pandora` IPC target. Hotkeys must use
+  `omarchy-shell shell toggle alturatechnology.pandora` (routed to the focused monitor).
+  `omarchy-shell alturatechnology.pandora play|pause|skip|thumbUp|thumbDown` are fine
   because they do not care which copy answers.
 - The hotkey binding lives in the user's Hyprland config,
   outside this repo.
@@ -67,8 +67,8 @@ do not reset on progress ticks. Keep that property when adding fields.
   `pkill -f` from matching the command line that runs it. The shell respawns
   the engine within ~2 s.
 - Inspect state: connect to the socket and read one line of JSON, or
-  `tail ~/.local/state/mark.pandora/engine.log`.
-- Screenshot the card: `omarchy-shell shell toggle mark.pandora`, then
+  `tail ~/.local/state/alturatechnology.pandora/engine.log`.
+- Screenshot the card: `omarchy-shell shell toggle alturatechnology.pandora`, then
   `grim -o <monitor>`; the card is on the focused monitor.
 - Shell source for reference APIs: `/usr/share/omarchy/shell` (`Ui/`,
   `Commons/`, `plugins/panels/network/Panel.qml` is a good model).
