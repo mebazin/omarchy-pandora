@@ -5,7 +5,7 @@ A **P** in the bar opens a card with now playing, play/pause, skip, thumbs
 up/down, "tired of this song", and a station picker. Audio keeps playing
 when the card closes and across shell restarts.
 
-<img src="docs/card.png" alt="The Pandora card: album art, track info, station button, transport and thumbs buttons" width="404">
+<img src="preview.png" alt="The Pandora card: album art, track info, station button, transport and thumbs buttons" width="404">
 
 Built for Omarchy's Quickshell-based shell. Text and borders follow the
 active theme.
@@ -31,6 +31,17 @@ the card opens on the focused monitor:
 ```lua
 o.bind("SUPER + SHIFT + M", "Pandora", "omarchy-shell shell toggle mebazin.pandora")
 ```
+
+To remove it:
+
+```sh
+omarchy plugin remove mebazin.pandora
+```
+
+That deletes the plugin and stops the bar widget. The engine exits with the
+shell restart. To also forget your saved sign-in, sign out from the card
+first (it clears the keyring entry), or delete `~/.local/state/mebazin.pandora`
+and run `secret-tool clear service mebazin.pandora`.
 
 ## Use
 
