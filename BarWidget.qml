@@ -6,7 +6,7 @@ import qs.Commons
 
 BarWidget {
   id: root
-  moduleName: "alturatechnology.pandora"
+  moduleName: "mebazin.pandora"
 
   property bool opened: false
   property bool popoutSwitchClosing: false
@@ -111,7 +111,7 @@ BarWidget {
   }
 
   IpcHandler {
-    target: "alturatechnology.pandora"
+    target: "mebazin.pandora"
     function toggle(): void { root.toggle() }
     function open(): void { root.open() }
     function close(): void { root.close() }

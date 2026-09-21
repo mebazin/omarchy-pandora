@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "alturatechnology.pandora",
+  "id": "mebazin.pandora",
   "name": "Pandora",
   "version": "0.1.0",
-  "author": "Altura Technology",
+  "author": "Mark Bazin",
   "license": "MIT",
   "description": "Pandora stations from the Omarchy bar: play, skip, thumbs, and a station picker.",
   "kinds": [

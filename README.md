@@ -22,14 +22,14 @@ active theme.
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/AlturaTechnology/omarchy-pandora --enable
+omarchy plugin add https://github.com/mebazin/omarchy-pandora --enable
 ```
 
 Then bind a key in your Hyprland config. Use the shell's routed toggle so
 the card opens on the focused monitor:
 
 ```lua
-o.bind("SUPER + SHIFT + M", "Pandora", "omarchy-shell shell toggle alturatechnology.pandora")
+o.bind("SUPER + SHIFT + M", "Pandora", "omarchy-shell shell toggle mebazin.pandora")
 ```
 
 ## Use
@@ -43,11 +43,11 @@ o.bind("SUPER + SHIFT + M", "Pandora", "omarchy-shell shell toggle alturatechnol
 Other IPC commands, for scripts or extra keybindings:
 
 ```sh
-omarchy-shell alturatechnology.pandora play
-omarchy-shell alturatechnology.pandora pause
-omarchy-shell alturatechnology.pandora skip
-omarchy-shell alturatechnology.pandora thumbUp
-omarchy-shell alturatechnology.pandora thumbDown
+omarchy-shell mebazin.pandora play
+omarchy-shell mebazin.pandora pause
+omarchy-shell mebazin.pandora skip
+omarchy-shell mebazin.pandora thumbUp
+omarchy-shell mebazin.pandora thumbDown
 ```
 
 ## How it works
@@ -58,7 +58,7 @@ omarchy-shell alturatechnology.pandora thumbDown
 - `Service.qml` is the socket client the shell loads once.
 - `BarWidget.qml` and `Popover.qml` are the icon and the card.
 
-Logs and saved state live in `~/.local/state/alturatechnology.pandora/`.
+Logs and saved state live in `~/.local/state/mebazin.pandora/`.
 
 ## Caveats
 

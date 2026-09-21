@@ -29,7 +29,7 @@ Item {
     var dir = Quickshell.env("XDG_RUNTIME_DIR")
     return dir && dir.length ? dir : "/run/user/1000"
   }
-  readonly property string socketPath: runtimeDir + "/alturatechnology.pandora/engine.sock"
+  readonly property string socketPath: runtimeDir + "/mebazin.pandora/engine.sock"
   property var socket: null
   readonly property bool connected: !!(socket && socket.connected)
   readonly property bool authenticated: !!(state && state.authenticated)
@@ -52,7 +52,7 @@ Item {
 
   function ensureEngine() {
     if (spawns >= maxSpawns) {
-      transportError = "Pandora engine failed to start. See ~/.local/state/alturatechnology.pandora/engine.log"
+      transportError = "Pandora engine failed to start. See ~/.local/state/mebazin.pandora/engine.log"
       return
     }
     spawns++
