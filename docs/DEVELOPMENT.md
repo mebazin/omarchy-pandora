@@ -1,4 +1,4 @@
-# Pandora plugin for the Omarchy shell
+# Pandora plugin: development notes
 
 Bar widget + popover card for Pandora station radio. Plugin id `mebazin.pandora`.
 The live install and the git checkout are the same directory:

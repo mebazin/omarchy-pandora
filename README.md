@@ -81,7 +81,7 @@ Logs and saved state live in `~/.local/state/mebazin.pandora/`.
 
 ## Development
 
-See [CLAUDE.md](CLAUDE.md) for the architecture, threading model, socket
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the architecture, threading model, socket
 protocol, and how to verify changes against a live shell.
 
 ## License
