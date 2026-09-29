@@ -212,6 +212,9 @@ class Pandora:
         self.http.cookies.set("csrftoken", self.csrf, domain="pandora.com")
 
     def login(self, email: str, password: str) -> None:
+        # A previous session's token must not ride along on the login call:
+        # Pandora answers 401 to a login carrying an expired X-AuthToken.
+        self.auth = ""
         self._ensure_csrf()
         response = self.http.post(
             f"{API}/auth/login",
@@ -225,7 +228,15 @@ class Pandora:
             timeout=30,
         )
         if response.status_code != 200:
-            raise RuntimeError(f"Login failed (HTTP {response.status_code})")
+            detail = ""
+            try:
+                body = response.json()
+                detail = body.get("message") or body.get("errorString") or ""
+            except ValueError:
+                pass
+            raise RuntimeError(
+                f"Login failed: {detail}" if detail else f"Login failed (HTTP {response.status_code})"
+            )
         data = response.json()
         if data.get("errorCode") is not None:
             raise RuntimeError(data.get("message") or data.get("errorString") or "Login failed")
@@ -251,8 +262,13 @@ class Pandora:
         if response.status_code == 401 and retry:
             creds = secret_lookup()
             if not creds:
+                self.auth = ""
                 raise RuntimeError("Session expired. Sign in again.")
-            self.login(*creds)
+            try:
+                self.login(*creds)
+            except Exception as exc:
+                self.auth = ""
+                raise RuntimeError(f"Session expired and sign-in failed: {exc}") from exc
             return self.request(path, payload, retry=False)
         if response.status_code == 429:
             body: dict = {}
@@ -595,7 +611,16 @@ class Engine:
 
     def set_error(self, message: str) -> None:
         self.error = message
-        self.status = "error"
+        # Losing the session (expired token, failed re-login) is a sign-out
+        # from the UI's point of view: stop playback and show the form.
+        if not self.api.auth:
+            self.status = "needs_login"
+            self.mpv.stop()
+            self.playing = False
+            self.paused = False
+            self.want_next = False
+        else:
+            self.status = "error"
         log(f"error: {message}")
         self.broadcast()
 

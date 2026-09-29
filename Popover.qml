@@ -8,7 +8,7 @@ FocusScope {
   required property var service
   signal closeRequested()
 
-  property string email: ""
+  property string email: service && service.state && service.state.email ? service.state.email : ""
   property string password: ""
   property bool showStations: false
   readonly property var track: service ? service.track : null
@@ -81,7 +81,7 @@ FocusScope {
       }
       Item { Layout.fillWidth: true }
       Text {
-        visible: card.errorText !== ""
+        visible: card.errorText !== "" && card.signedIn
         text: card.errorText
         textFormat: Text.PlainText
         color: Color.urgent
@@ -98,6 +98,16 @@ FocusScope {
       Layout.fillHeight: true
       spacing: Style.spacing.md
 
+      Text {
+        visible: card.errorText !== ""
+        text: card.errorText
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        color: Color.urgent
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        Layout.fillWidth: true
+      }
       Text {
         text: "Sign in with your Pandora account. Stations play from the bar after that."
         textFormat: Text.PlainText
