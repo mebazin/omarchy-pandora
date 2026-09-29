@@ -15,6 +15,7 @@ FocusScope {
   readonly property var station: service ? service.station : null
   readonly property var stations: service ? service.stations : []
   readonly property bool signedIn: !!(service && service.authenticated)
+  readonly property string accountEmail: service && service.state && service.state.email ? service.state.email : ""
   readonly property bool playing: !!(service && service.playing)
   readonly property string errorText: {
     if (!service || !service.error) return ""
@@ -311,6 +312,34 @@ FocusScope {
         font.pixelSize: Style.font.caption
         horizontalAlignment: Text.AlignHCenter
       }
+
+      Rectangle {
+        Layout.fillWidth: true
+        Layout.topMargin: Style.space(2)
+        height: 1
+        color: Qt.alpha(card.fg, 0.15)
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: 8
+        Text {
+          Layout.fillWidth: true
+          text: card.accountEmail
+          textFormat: Text.PlainText
+          color: card.dim
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideMiddle
+        }
+        Button {
+          text: "Sign out"
+          foreground: card.fg
+          fontSize: Style.font.bodySmall
+          bordered: true
+          onClicked: if (service) service.logout()
+        }
+      }
     }
 
     ColumnLayout {
@@ -357,17 +386,6 @@ FocusScope {
             if (service) service.selectStation(stationItem.id)
             card.showStations = false
           }
-        }
-      }
-
-      Button {
-        Layout.fillWidth: true
-        foreground: card.fg
-        text: "Sign out"
-        bordered: true
-        onClicked: {
-          if (service) service.logout()
-          card.showStations = false
         }
       }
     }
