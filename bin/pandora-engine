@@ -30,6 +30,14 @@ USER_AGENT = (
 PROTOCOL = 1
 PLUGIN_ID = "mebazin.pandora"
 
+# The engine runs detached so audio survives a shell restart, which
+# reconnects within a few seconds. With no client for this long the shell is
+# gone or the plugin was removed, so stop playback and exit.
+IDLE_EXIT_SECONDS = float(os.environ.get("PANDORA_ENGINE_IDLE_EXIT", "30"))
+# The plugin checkout this engine was started from; if its manifest
+# disappears the plugin has been uninstalled.
+PLUGIN_MANIFEST = Path(__file__).resolve().parent.parent / "manifest.json"
+
 
 def runtime_dir() -> Path:
     base = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
@@ -1013,6 +1021,8 @@ def main(argv: list[str]) -> int:
     worker = Worker()
     engine = Engine(worker)
     stopping = False
+    idle_since = time.monotonic()
+    next_install_check = 0.0
 
     def stop(*_args) -> None:
         nonlocal stopping
@@ -1026,6 +1036,17 @@ def main(argv: list[str]) -> int:
 
     try:
         while not stopping:
+            now = time.monotonic()
+            if engine.clients:
+                idle_since = now
+            elif now - idle_since >= IDLE_EXIT_SECONDS:
+                log(f"no clients for {int(IDLE_EXIT_SECONDS)}s; exiting")
+                break
+            if now >= next_install_check:
+                next_install_check = now + 2
+                if not PLUGIN_MANIFEST.exists():
+                    log("plugin removed; exiting")
+                    break
             readers: list = [listen, worker.rfd] + engine.clients
             if engine.mpv.sock is not None:
                 readers.append(engine.mpv.sock)

@@ -38,10 +38,16 @@ To remove it:
 omarchy plugin remove mebazin.pandora
 ```
 
-That deletes the plugin and stops the bar widget. The engine exits with the
-shell restart. To also forget your saved sign-in, sign out from the card
-first (it clears the keyring entry), or delete `~/.local/state/mebazin.pandora`
-and run `secret-tool clear service mebazin.pandora`.
+That deletes the plugin and the bar widget. The background engine notices
+the plugin folder is gone within a couple of seconds, stops playback, and
+exits. It also exits on its own whenever the shell has been gone for 30
+seconds, so it never outlives the bar; a normal shell restart reconnects well
+inside that window, which is why music keeps playing across restarts.
+
+Removing the plugin keeps your saved sign-in. To forget it too, sign out from
+the card first (it clears the keyring entry), or afterwards delete
+`~/.local/state/mebazin.pandora` and run
+`secret-tool clear service mebazin.pandora`.
 
 ## Use
 
